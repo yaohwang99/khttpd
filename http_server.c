@@ -1,11 +1,12 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include "http_server.h"
 #include <linux/kthread.h>
 #include <linux/sched/signal.h>
+#include <linux/slab.h>
 #include <linux/tcp.h>
-
+#include <linux/workqueue.h>
 #include "http_parser.h"
-#include "http_server.h"
 
 #define CRLF "\r\n"
 
@@ -31,14 +32,17 @@
     "Connection: KeepAlive" CRLF CRLF "501 Not Implemented" CRLF
 
 #define RECV_BUFFER_SIZE 4096
-
+extern struct workqueue_struct *http_wq;
 struct http_request {
     struct socket *socket;
     enum http_method method;
     char request_url[128];
     int complete;
 };
-
+struct http_work {
+    struct socket *socket;
+    struct work_struct work;
+};
 static int http_server_recv(struct socket *sock, char *buf, size_t size)
 {
     struct kvec iov = {.iov_base = (void *) buf, .iov_len = size};
@@ -141,7 +145,7 @@ static int http_parser_callback_message_complete(http_parser *parser)
     return 0;
 }
 
-static int http_server_worker(void *arg)
+static void http_server_worker(struct work_struct *work)
 {
     char *buf;
     struct http_parser parser;
@@ -154,7 +158,8 @@ static int http_server_worker(void *arg)
         .on_body = http_parser_callback_body,
         .on_message_complete = http_parser_callback_message_complete};
     struct http_request request;
-    struct socket *socket = (struct socket *) arg;
+    struct http_work *hwork = container_of(work, struct http_work, work);
+    struct socket *socket = hwork->socket;
 
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
@@ -162,7 +167,7 @@ static int http_server_worker(void *arg)
     buf = kmalloc(RECV_BUFFER_SIZE, GFP_KERNEL);
     if (!buf) {
         pr_err("can't allocate memory!\n");
-        return -1;
+        return;
     }
 
     request.socket = socket;
@@ -182,15 +187,16 @@ static int http_server_worker(void *arg)
     kernel_sock_shutdown(socket, SHUT_RDWR);
     sock_release(socket);
     kfree(buf);
-    return 0;
+    kfree(hwork);
+    return;
 }
 
 int http_server_daemon(void *arg)
 {
     struct socket *socket;
-    struct task_struct *worker;
+    // struct task_struct *worker;
     struct http_server_param *param = (struct http_server_param *) arg;
-
+    struct http_work *hwork;
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
 
@@ -202,11 +208,11 @@ int http_server_daemon(void *arg)
             pr_err("kernel_accept() error: %d\n", err);
             continue;
         }
-        worker = kthread_run(http_server_worker, socket, KBUILD_MODNAME);
-        if (IS_ERR(worker)) {
-            pr_err("can't create more worker process\n");
-            continue;
-        }
+        hwork = kmalloc(sizeof(struct http_work), GFP_KERNEL);
+        hwork->socket = socket;
+        INIT_WORK(&hwork->work, http_server_worker);
+        // worker = kthread_run(http_server_worker, socket, KBUILD_MODNAME);
+        queue_work(http_wq, &hwork->work);
     }
     return 0;
 }

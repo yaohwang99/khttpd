@@ -19,7 +19,7 @@ module_param(backlog, ushort, S_IRUGO);
 static struct socket *listen_socket;
 static struct http_server_param param;
 static struct task_struct *http_server;
-
+struct workqueue_struct *http_wq;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
 static int set_sock_opt(struct socket *sock,
                         int level,
@@ -160,6 +160,7 @@ static int __init khttpd_init(void)
         return err;
     }
     param.listen_socket = listen_socket;
+    http_wq = alloc_workqueue("http_wq", WQ_UNBOUND, 0);
     http_server = kthread_run(http_server_daemon, &param, KBUILD_MODNAME);
     if (IS_ERR(http_server)) {
         pr_err("can't start http server daemon\n");
